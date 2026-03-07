@@ -261,12 +261,8 @@ def prompt_worker(q, server_instance):
             for k in sensitive:
                 extra_data[k] = sensitive[k]
 
-            was_paused = asset_seeder.pause()
-            try:
-                e.execute(item[2], prompt_id, extra_data, item[4])
-            finally:
-                if was_paused:
-                    asset_seeder.resume()
+            asset_seeder.pause()
+            e.execute(item[2], prompt_id, extra_data, item[4])
             need_gc = True
 
             remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
@@ -310,6 +306,7 @@ def prompt_worker(q, server_instance):
                 last_gc_collect = current_time
                 need_gc = False
                 hook_breaker_ac10a0.restore_functions()
+                asset_seeder.resume()
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
