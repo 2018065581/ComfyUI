@@ -148,9 +148,10 @@ class CacheKeySetInputSignature(CacheKeySet):
                     self.get_ordered_ancestry_internal(dynprompt, ancestor_id, ancestors, order_mapping)
 
 class BasicCache:
-    def __init__(self, key_class):
+    def __init__(self, key_class, enable_providers=False):
         self.key_class = key_class
         self.initialized = False
+        self.enable_providers = enable_providers
         self.dynprompt: DynamicPrompt
         self.cache_key_set: CacheKeySet
         self.cache = {}
@@ -239,6 +240,8 @@ class BasicCache:
             CacheValue, _contains_self_unequal, _logger
         )
 
+        if not self.enable_providers:
+            return
         if not _has_cache_providers():
             return
         if not self._is_external_cacheable_value(value):
@@ -274,6 +277,8 @@ class BasicCache:
             CacheValue, _contains_self_unequal, _logger
         )
 
+        if not self.enable_providers:
+            return None
         if not _has_cache_providers():
             return None
         if _contains_self_unequal(cache_key):
@@ -296,7 +301,7 @@ class BasicCache:
                         _logger.warning(f"Provider {provider.__class__.__name__} returned invalid outputs")
                         continue
                     from execution import CacheEntry
-                    return CacheEntry(ui=result.ui or {}, outputs=list(result.outputs))
+                    return CacheEntry(ui=result.ui, outputs=list(result.outputs))
             except Exception as e:
                 _logger.warning(f"Cache provider {provider.__class__.__name__} error on lookup: {e}")
 
@@ -354,8 +359,8 @@ class BasicCache:
         return result
 
 class HierarchicalCache(BasicCache):
-    def __init__(self, key_class):
-        super().__init__(key_class)
+    def __init__(self, key_class, enable_providers=False):
+        super().__init__(key_class, enable_providers=enable_providers)
 
     def _get_cache_for(self, node_id):
         assert self.dynprompt is not None
@@ -432,8 +437,8 @@ class NullCache:
         return self
 
 class LRUCache(BasicCache):
-    def __init__(self, key_class, max_size=100):
-        super().__init__(key_class)
+    def __init__(self, key_class, max_size=100, enable_providers=False):
+        super().__init__(key_class, enable_providers=enable_providers)
         self.max_size = max_size
         self.min_generation = 0
         self.generation = 0
@@ -501,8 +506,8 @@ RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
 class RAMPressureCache(LRUCache):
 
-    def __init__(self, key_class):
-        super().__init__(key_class, 0)
+    def __init__(self, key_class, enable_providers=False):
+        super().__init__(key_class, 0, enable_providers=enable_providers)
         self.timestamps = {}
 
     def clean_unused(self):
