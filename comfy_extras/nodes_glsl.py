@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 import nodes
+import comfy_angle
 from comfy_api.latest import ComfyExtension, io, ui
 from typing_extensions import override
 
@@ -17,30 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 def _preload_angle():
-    """Pre-load ANGLE shared libraries so PyOpenGL discovers them."""
-    base_dir = Path(__file__).resolve().parent.parent
-    # TODO: install from python package
-    angle_dir = base_dir / "user"
+    egl_path = comfy_angle.get_egl_path()
+    gles_path = comfy_angle.get_glesv2_path()
 
     if sys.platform == "win32":
-        egl_name, gles_name = "libEGL.dll", "libGLESv2.dll"
-    elif sys.platform == "darwin":
-        egl_name, gles_name = "libEGL.dylib", "libGLESv2.dylib"
-    else:
-        egl_name, gles_name = "libEGL.so", "libGLESv2.so"
-
-    egl_path = angle_dir / egl_name
-    gles_path = angle_dir / gles_name
-
-    if not egl_path.is_file() or not gles_path.is_file():
-        raise RuntimeError(
-            f"GLSL Shader node: ANGLE libraries not found.\n"
-            f"Place {egl_name} and {gles_name} in {angle_dir}/"
-        )
-
-    if sys.platform == "win32":
-        os.add_dll_directory(str(angle_dir))
-        os.environ["PATH"] = str(angle_dir) + os.pathsep + os.environ.get("PATH", "")
+        angle_dir = os.comfy_angle.get_lib_dir()
+        os.add_dll_directory(angle_dir)
+        os.environ["PATH"] = angle_dir + os.pathsep + os.environ.get("PATH", "")
 
     mode = 0 if sys.platform == "win32" else ctypes.RTLD_GLOBAL
     ctypes.CDLL(str(egl_path), mode=mode)
