@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Callable, Literal, TypedDict, TypeVar, TYPE_CHECKING
 from typing_extensions import NotRequired, final
+from urllib.parse import urlparse
 
 # used for type hinting
 import torch
@@ -43,7 +44,67 @@ class UploadType(str, Enum):
     model = "file_upload"
 
 
+class RemoteItemSchema:
+    """Describes how to map API response objects to rich dropdown items.
+
+    All *_field parameters use dot-path notation (e.g. ``"labels.gender"``).
+    ``label_field`` and ``description_field`` additionally support template strings
+    with ``{field}`` placeholders (e.g. ``"{name} ({labels.accent})"``).
+    """
+    def __init__(
+        self,
+        value_field: str,
+        label_field: str,
+        preview_url_field: str | None = None,
+        preview_type: Literal["image", "video", "audio"] = "image",
+        description_field: str | None = None,
+        search_fields: list[str] | None = None,
+    ):
+        if preview_type not in ("image", "video", "audio"):
+            raise ValueError(
+                f"RemoteItemSchema: 'preview_type' must be 'image', 'video', or 'audio'; got {preview_type!r}."
+            )
+        if search_fields is not None:
+            for f in search_fields:
+                if "{" in f or "}" in f:
+                    raise ValueError(
+                        f"RemoteItemSchema: 'search_fields' must be dot-paths, not template strings (got {f!r})."
+                    )
+        self.value_field = value_field
+        """Dot-path to the unique identifier within each item.
+        This value is stored in the widget and passed to execute()."""
+        self.label_field = label_field
+        """Dot-path to the display name, or a template string with {field} placeholders."""
+        self.preview_url_field = preview_url_field
+        """Dot-path to a preview media URL. If None, no preview is shown."""
+        self.preview_type = preview_type
+        """How to render the preview: "image", "video", or "audio"."""
+        self.description_field = description_field
+        """Optional dot-path or template for a subtitle line shown below the label."""
+        self.search_fields = search_fields
+        """Dot-paths to fields included in the search index. When unset, search falls back to
+        the resolved label (i.e. ``label_field`` after template substitution). Note that template
+        label strings (e.g. ``"{first} {last}"``) are not valid path entries here — list the
+        underlying paths (``["first", "last"]``) instead."""
+
+    def as_dict(self):
+        return prune_dict({
+            "value_field": self.value_field,
+            "label_field": self.label_field,
+            "preview_url_field": self.preview_url_field,
+            "preview_type": self.preview_type,
+            "description_field": self.description_field,
+            "search_fields": self.search_fields,
+        })
+
+
 class RemoteOptions:
+    """Plain remote combo: fetches a list of strings/objects and populates a standard dropdown.
+
+    Use this for lightweight lists from endpoints that return a bare array (or an array under
+    ``response_key``). For rich dropdowns with previews, search, filtering, or pagination,
+    use :class:`RemoteComboOptions` and the ``remote_combo=`` parameter on ``Combo.Input``.
+    """
     def __init__(self, route: str, refresh_button: bool, control_after_refresh: Literal["first", "last"]="first",
                  timeout: int=None, max_retries: int=None, refresh: int=None):
         self.route = route
@@ -67,6 +128,113 @@ class RemoteOptions:
             "timeout": self.timeout,
             "max_retries": self.max_retries,
             "refresh": self.refresh,
+        })
+
+
+class RemoteComboOptions:
+    """Rich remote combo: populates a Vue dropdown with previews, search, filtering, and pagination.
+
+    Attached to a :class:`Combo.Input` via ``remote_combo=`` (not ``remote=``). Requires an
+    ``item_schema`` describing how to map API response objects to dropdown items.
+
+    Response-shape contract:
+    - Without ``page_size``: endpoint returns an array (or an array at ``response_key``).
+    - With ``page_size``: endpoint returns ``{"items": [...], "has_more": bool}`` and is fetched
+      progressively, appending each page to the dropdown.
+
+    Pagination contract (when ``page_size`` is set):
+    - The frontend issues ``GET <route>?page=<n>&page_size=<size>`` with ``page`` starting at ``0``
+      and incrementing by 1 until the endpoint returns ``has_more: false`` or an empty ``items`` list.
+    - Endpoints that use 1-based pages, ``limit``/``offset``, or cursor/continuation tokens are not
+      supported directly - adapt them via the proxy or
+      expose a small shim endpoint that translates to the ``page`` + ``page_size`` + ``{items, has_more}`` shape.
+    """
+    def __init__(
+        self,
+        route: str,
+        item_schema: RemoteItemSchema,
+        refresh_button: bool = True,
+        auto_select: Literal["first", "last"] | None = None,
+        timeout: int | None = None,
+        max_retries: int | None = None,
+        refresh: int | None = None,
+        response_key: str | None = None,
+        use_comfy_api: bool = False,
+        page_size: int | None = None,
+    ):
+        if page_size is not None:
+            if response_key is not None:
+                raise ValueError(
+                    "RemoteComboOptions: pass 'response_key' or 'page_size', not both. "
+                    "Paginated responses must use the top-level 'items' field."
+                )
+            if page_size < 1:
+                raise ValueError(
+                    f"RemoteComboOptions: 'page_size' must be >= 1 when set (got {page_size})."
+                )
+        if auto_select is not None and auto_select not in ("first", "last"):
+            raise ValueError(
+                f"RemoteComboOptions: 'auto_select' must be 'first', 'last', or None; got {auto_select!r}."
+            )
+        if refresh is not None and 0 < refresh < 128:
+            raise ValueError(
+                f"RemoteComboOptions: 'refresh' must be >= 128 (ms TTL) or <= 0 (cache never expires); got {refresh}."
+            )
+        if timeout is not None and timeout < 0:
+            raise ValueError(
+                f"RemoteComboOptions: 'timeout' must be >= 0 (got {timeout})."
+            )
+        if max_retries is not None and max_retries < 0:
+            raise ValueError(
+                f"RemoteComboOptions: 'max_retries' must be >= 0 (got {max_retries})."
+            )
+        if not route.startswith("/"):
+            parsed = urlparse(route)
+            if not (parsed.scheme and parsed.netloc):
+                raise ValueError(
+                    f"RemoteComboOptions: 'route' must start with '/' or be an absolute URL; got {route!r}."
+                )
+            if use_comfy_api:
+                raise ValueError(
+                    f"RemoteComboOptions: 'use_comfy_api=True' cannot be combined with absolute URL {route!r}."
+                )
+        self.route = route
+        """The route to the remote source."""
+        self.item_schema = item_schema
+        """Required: describes how each API response object maps to a dropdown item."""
+        self.refresh_button = refresh_button
+        """Specifies whether to show a refresh button next to the widget."""
+        self.auto_select = auto_select
+        """Fallback item to select when the widget's value is empty. Never overrides an existing
+        selection. Default None means no fallback."""
+        self.timeout = timeout
+        """Maximum time to wait for a response, in milliseconds."""
+        self.max_retries = max_retries
+        """Maximum number of retries before aborting the request. Default None uses the frontend's built-in limit."""
+        self.refresh = refresh
+        """TTL of the cached value in milliseconds. Must be >= 128 (ms TTL) or <= 0 (cache never expires,
+        re-fetched only via the refresh button). Default None uses the frontend's built-in behavior."""
+        self.response_key = response_key
+        """Dot-path to the items array in a non-paginated response. Mutually exclusive with
+        ``page_size``; paginated responses must use the top-level ``items`` field."""
+        self.use_comfy_api = use_comfy_api
+        """When True, the frontend prepends the comfy-api base URL to ``route`` and injects auth headers."""
+        self.page_size = page_size
+        """When set, switches the widget to progressive-fetch mode. The endpoint must return
+        ``{"items": [...], "has_more": bool}``."""
+
+    def as_dict(self):
+        return prune_dict({
+            "route": self.route,
+            "item_schema": self.item_schema.as_dict(),
+            "refresh_button": self.refresh_button,
+            "auto_select": self.auto_select,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+            "refresh": self.refresh,
+            "response_key": self.response_key,
+            "use_comfy_api": self.use_comfy_api,
+            "page_size": self.page_size,
         })
 
 
@@ -359,11 +527,16 @@ class Combo(ComfyTypeIO):
             upload: UploadType=None,
             image_folder: FolderType=None,
             remote: RemoteOptions=None,
+            remote_combo: RemoteComboOptions=None,
             socketless: bool=None,
             extra_dict=None,
             raw_link: bool=None,
             advanced: bool=None,
         ):
+            if remote is not None and remote_combo is not None:
+                raise ValueError("Combo.Input: pass either 'remote' or 'remote_combo', not both.")
+            if options is not None and remote_combo is not None:
+                raise ValueError("Combo.Input: pass either 'options' or 'remote_combo', not both.")
             if isinstance(options, type) and issubclass(options, Enum):
                 options = [v.value for v in options]
             if isinstance(default, Enum):
@@ -375,6 +548,7 @@ class Combo(ComfyTypeIO):
             self.upload = upload
             self.image_folder = image_folder
             self.remote = remote
+            self.remote_combo = remote_combo
             self.default: str
 
         def as_dict(self):
@@ -385,6 +559,7 @@ class Combo(ComfyTypeIO):
                 **({self.upload.value: True} if self.upload is not None else {}),
                 "image_folder": self.image_folder.value if self.image_folder else None,
                 "remote": self.remote.as_dict() if self.remote else None,
+                "remote_combo": self.remote_combo.as_dict() if self.remote_combo else None,
             })
 
     class Output(Output):
@@ -2184,7 +2359,9 @@ class NodeReplace:
 __all__ = [
     "FolderType",
     "UploadType",
+    "RemoteItemSchema",
     "RemoteOptions",
+    "RemoteComboOptions",
     "NumberDisplay",
     "ControlAfterGenerate",
 
