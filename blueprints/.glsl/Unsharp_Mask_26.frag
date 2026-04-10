@@ -19,7 +19,7 @@ float getLuminance(vec3 color) {
 }
 
 void main() {
-    vec2 texel = 1.0 / u_resolution;
+    vec2 texel = 1.0 / vec2(textureSize(u_image0, 0));
     float radius = max(u_float1, 0.5);
     float amount = u_float0;
     float threshold = u_float2;

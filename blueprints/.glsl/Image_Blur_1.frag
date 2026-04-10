@@ -25,7 +25,7 @@ float gaussian(float x, float sigma) {
 }
 
 void main() {
-    vec2 texelSize = 1.0 / u_resolution;
+    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));
     float radius = max(u_float0, 0.0);
 
     // Radial (angular) blur - single pass, doesn't use separable
